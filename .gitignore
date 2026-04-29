@@ -1,4 +1,5 @@
 # macOS / editor noise
+__MACOSX/
 .DS_Store
 *.swp
 *.swo
@@ -43,9 +44,11 @@ wandb/
 
 # Datasets
 Dataset-final/
+Dentex-licenta-dataset/
 dataset/
 datasets/
 data/
+.ipynb_checkpoints/
 
 # Generated documents / Office lock files
 *.aux
