@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+sqlalchemy
+python-multipart
+python-dotenv
+torch
+torchvision
+opencv-python
+numpy
+pillow
+passlib[bcrypt]
+python-jose[cryptography]
+pydantic
+pydantic-settings
+google-generativeai
