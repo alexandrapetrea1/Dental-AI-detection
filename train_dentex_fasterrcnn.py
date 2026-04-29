@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from torchvision import tv_tensors
 from torchvision.datasets import CocoDetection
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.rpn import AnchorGenerator
+from torchvision.models.detection.rpn import AnchorGenerator, RPNHead
 from torchvision.transforms import v2 as T
 
 
@@ -21,6 +21,7 @@ DEFAULT_CLASSES = [
     {"id": 3, "name": "Periapical Lesion", "supercategory": ""},
     {"id": 4, "name": "Deep Caries", "supercategory": ""},
 ]
+DEFAULT_CLASS_NAMES = {item["id"]: item["name"] for item in DEFAULT_CLASSES}
 
 
 def normalize_dentex_json(input_path, output_path=None):
@@ -33,11 +34,13 @@ def normalize_dentex_json(input_path, output_path=None):
         return str(input_path)
 
     categories_3 = data.get("categories_3") or DEFAULT_CLASSES
+    raw_category_ids = [int(cat["id"]) for cat in categories_3]
+    id_offset = 1 if raw_category_ids and min(raw_category_ids) == 0 else 0
+    id_mapping = {raw_id: raw_id + id_offset for raw_id in raw_category_ids}
     categories = []
     for cat in categories_3:
-        cat_id = int(cat["id"])
-        if cat_id == 0:
-            cat_id += 1
+        raw_id = int(cat["id"])
+        cat_id = id_mapping[raw_id]
         categories.append(
             {
                 "id": cat_id,
@@ -52,7 +55,8 @@ def normalize_dentex_json(input_path, output_path=None):
         if "category_id" in ann:
             category_id = int(ann["category_id"])
         elif "category_id_3" in ann:
-            category_id = int(ann["category_id_3"]) + 1
+            raw_category_id = int(ann["category_id_3"])
+            category_id = id_mapping.get(raw_category_id, raw_category_id + id_offset)
         else:
             continue
 
@@ -89,11 +93,34 @@ class DentexCocoDataset(CocoDetection):
     def __init__(self, image_root, ann_file, transforms=None):
         self.normalized_ann_file = normalize_dentex_json(ann_file)
         super().__init__(image_root, self.normalized_ann_file)
-        self.transforms = transforms
+        self.sample_transforms = transforms
+        self.transforms = None
+
+    @staticmethod
+    def _get_canvas_size(img):
+        if hasattr(img, "size"):
+            size = img.size
+            if isinstance(size, tuple) and len(size) == 2:
+                width, height = size
+                return int(height), int(width)
+
+        if hasattr(img, "shape"):
+            shape = img.shape
+            if len(shape) >= 2:
+                if len(shape) == 2:
+                    height, width = shape
+                else:
+                    height, width = shape[-2], shape[-1]
+                return int(height), int(width)
+
+        if hasattr(img, "height") and hasattr(img, "width"):
+            return int(img.height), int(img.width)
+
+        raise TypeError(f"Unsupported image type for canvas size inference: {type(img)!r}")
 
     def __getitem__(self, idx):
         img, anns = super().__getitem__(idx)
-        canvas_size = (img.height, img.width)
+        canvas_size = self._get_canvas_size(img)
 
         boxes = []
         labels = []
@@ -127,8 +154,8 @@ class DentexCocoDataset(CocoDetection):
             "iscrowd": iscrowd,
         }
 
-        if self.transforms is not None:
-            img, target = self.transforms(img, target)
+        if self.sample_transforms is not None:
+            img, target = self.sample_transforms(img, target)
 
         target["boxes"] = torch.as_tensor(target["boxes"], dtype=torch.float32)
         target["labels"] = target["labels"].to(dtype=torch.int64)
@@ -162,10 +189,12 @@ def build_model(num_classes, min_size, max_size):
         max_size=max_size,
     )
 
-    model.rpn.anchor_generator = AnchorGenerator(
+    anchor_generator = AnchorGenerator(
         sizes=((32, 48), (64, 96), (128, 160), (192, 256), (320, 384)),
         aspect_ratios=((0.5, 0.75, 1.0, 1.5, 2.0),) * 5,
     )
+    model.rpn.anchor_generator = anchor_generator
+    model.rpn.head = RPNHead(model.backbone.out_channels, anchor_generator.num_anchors_per_location()[0])
     model.rpn.nms_thresh = 0.75
     model.rpn.post_nms_top_n_train = 2000
     model.rpn.post_nms_top_n_test = 1500
@@ -182,6 +211,16 @@ def collate_fn(batch):
     return tuple(zip(*batch))
 
 
+def validate_split_inputs(name, image_root, ann_file):
+    image_root = Path(image_root)
+    ann_file = Path(ann_file)
+
+    if not image_root.is_dir():
+        raise FileNotFoundError(f"{name} image directory not found: {image_root}")
+    if not ann_file.is_file():
+        raise FileNotFoundError(f"{name} annotation file not found: {ann_file}")
+
+
 def summarize_dataset(name, ann_file):
     ann_file = normalize_dentex_json(ann_file)
     with open(ann_file, "r") as f:
@@ -193,7 +232,10 @@ def summarize_dataset(name, ann_file):
     print(f"{name}: {len(data.get('images', []))} images | {len(data.get('annotations', []))} boxes | {readable}")
     if missing:
         print(f"  Warning: no examples for {', '.join(missing)}")
-    return ann_file
+    unexpected = sorted(cat_id for cat_id in counts if cat_id not in DEFAULT_CLASS_NAMES)
+    if unexpected:
+        print(f"  Warning: unexpected category ids in {name}: {unexpected}")
+    return ann_file, missing
 
 
 @torch.no_grad()
@@ -262,12 +304,31 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    train_ann = summarize_dataset("Train", args.train_ann)
-    val_ann = summarize_dataset("Val", args.val_ann)
+    validate_split_inputs("Train", args.train_images, args.train_ann)
+    validate_split_inputs("Val", args.val_images, args.val_ann)
+    if args.test_ann or args.test_images:
+        if not args.test_ann or not args.test_images:
+            raise ValueError("Provide both --test-images and --test-ann, or omit both.")
+        validate_split_inputs("Test", args.test_images, args.test_ann)
+
+    train_ann, train_missing = summarize_dataset("Train", args.train_ann)
+    val_ann, val_missing = summarize_dataset("Val", args.val_ann)
     if args.test_ann:
-        test_ann = summarize_dataset("Test", args.test_ann)
+        test_ann, test_missing = summarize_dataset("Test", args.test_ann)
     else:
         test_ann = None
+        test_missing = []
+
+    if val_missing:
+        print(
+            "Warning: validation split is missing classes, so mAP50-based model selection will not fully cover "
+            f"the label space: {', '.join(val_missing)}"
+        )
+    if test_missing:
+        print(
+            "Warning: test split is missing classes, so final evaluation will not fully cover "
+            f"the label space: {', '.join(test_missing)}"
+        )
 
     train_dataset = DentexCocoDataset(args.train_images, train_ann, build_transforms(train=True))
     val_dataset = DentexCocoDataset(args.val_images, val_ann, build_transforms(train=False))
