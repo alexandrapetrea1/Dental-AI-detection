@@ -1,0 +1,52 @@
+\documentclass[12pt]{report} 
+
+% language may be romanian or english (default is english)
+% type may be bachelor or master (default is bachelor)
+\usepackage[language=english, type=bachelor]{style}
+
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\lhead{}
+\chead{}
+\renewcommand{\headrulewidth}{0.2pt}
+\renewcommand{\footrulewidth}{0.2pt}
+
+\begin{document}
+
+\specialization{Computer Science}	
+\title{AI-Assisted Dental Imaging Web Platform \\ \large for Automated Finding Detection}					   
+\author{Alexandra Petrea}											
+\supervisor{Prof. Conf. univ. dr. Christian SACAREA}				
+				
+\maketitle
+
+\newpage
+\thispagestyle{empty}
+\mbox{}
+\newpage
+\pagenumbering{roman} 
+
+\cleardoublepage
+ABSTRACT
+\vspace{0.5cm}	
+\hrule
+\vspace{0.5cm}	
+
+This bachelor thesis presents the development of an AI-assisted web platform designed to automate the detection of dental anomalies using the Faster R-CNN object detection architecture. By training on a comprehensive dataset of panoramic and bitewing radiographs, the proposed system aims to demonstrate high precision in localizing interproximal caries, impacted teeth, and periapical lesions. The research bridges the gap between deep learning technologies and clinical diagnostics, providing a secure, user-friendly interface that serves as a robust second-opinion tool for modern dentistry. This automated approach prioritizing high accuracy over superficial speed is designed to reduce practitioner fatigue, minimize diagnostic errors, and ultimately optimize treatment workflows.
+
+\tableofcontents
+
+\newpage
+\pagenumbering{arabic}
+
+\input{chapters/chapter1_introduction}
+
+%\input{chapters/chapter2}
+\input{chapters/chapter3}
+%\input{chapters/chapter4}
+%\input{chapters/chapter6_conclusions}
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

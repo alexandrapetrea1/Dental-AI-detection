@@ -1,0 +1,64 @@
+# macOS / editor noise
+.DS_Store
+*.swp
+*.swo
+~$*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+backend/venv/
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+dist/
+build/
+frontend/dist/
+frontend/build/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local databases and generated uploads
+*.db
+backend/sql_app.db
+backend/uploads/
+backend/temp_dataset/
+
+# ML artifacts
+*.pt
+*.pth
+*.onnx
+*.ckpt
+runs/
+wandb/
+
+# Datasets
+Dataset-final/
+dataset/
+datasets/
+data/
+
+# Generated documents / Office lock files
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.lof
+*.log
+*.lot
+*.out
+*.run.xml
+*.synctex.gz
+*.toc
+
