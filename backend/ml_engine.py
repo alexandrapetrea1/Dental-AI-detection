@@ -1,7 +1,7 @@
 import torch
 import torchvision
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.rpn import AnchorGenerator
+from torchvision.models.detection.rpn import AnchorGenerator, RPNHead
 from torchvision.transforms import functional as F
 from pathlib import Path
 import os
@@ -17,10 +17,10 @@ IMAGE_MAX_SIZE = 2200
 device = torch.device('cpu')
 
 DENTEX_TAGS = {
-    1: "Impacted Tooth",
-    2: "Caries",
-    3: "Periapical Lesion",
-    4: "Deep Caries"
+    1: "Caries",
+    2: "Periapical Lesion",
+    3: "Deep Caries",
+    4: "Impacted Tooth"
 }
 
 def build_model(num_classes):
@@ -30,11 +30,16 @@ def build_model(num_classes):
         min_size=IMAGE_MIN_SIZE,
         max_size=IMAGE_MAX_SIZE,
     )
-    anchor_generator = AnchorGenerator(
-        sizes=((32, 48), (64, 96), (128, 160), (192, 256), (320, 384)),
-        aspect_ratios=((0.5, 0.75, 1.0, 1.5, 2.0),) * 5,
-    )
-    model.rpn.anchor_generator = anchor_generator
+    # anchor_generator = AnchorGenerator(
+    #     sizes=((32, 48), (64, 96), (128, 160), (192, 256), (320, 384)),
+    #     aspect_ratios=((0.5, 0.75, 1.0, 1.5, 2.0),) * 5,
+    # )
+    # model.rpn.anchor_generator = anchor_generator
+    # model.rpn.head = RPNHead(
+    #     model.backbone.out_channels,
+    #     anchor_generator.num_anchors_per_location()[0],
+    #     conv_depth=2,
+    # )
     model.rpn.nms_thresh = 0.75
     model.rpn.post_nms_top_n_test = 1500
     model.roi_heads.score_thresh = 0.001
@@ -49,10 +54,7 @@ try:
     model = build_model(NUM_CLASSES)
     repo_root = Path(__file__).resolve().parents[1]
     model_candidates = [
-        repo_root / "best_fasterrcnn_v2.pth",
-        repo_root / "best_fasterrcnn_hybrid.pth",
-        repo_root / "ai_licenta_hybrid_final_ep100.pth",
-        Path(__file__).resolve().parent / "best_fasterrcnn.pth - copie",
+        Path(__file__).resolve().parent / "best7mai.pth",
     ]
     loaded_path = None
     last_error = None
@@ -60,7 +62,11 @@ try:
         if not model_path.exists():
             continue
         try:
-            model.load_state_dict(torch.load(model_path, map_location=device))
+            checkpoint = torch.load(model_path, map_location=device)
+            if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                model.load_state_dict(checkpoint["model_state_dict"])
+            else:
+                model.load_state_dict(checkpoint)
             loaded_path = model_path
             break
         except Exception as exc:
@@ -96,33 +102,34 @@ def detect_anomalies(image_path: str):
         with torch.no_grad():
             predictions = model([img_tensor])[0]
         
-        threshold = 0.35 
+        threshold = 0.4
         
-        # 🟢 Pasul 1: Colectam toate detecțiile de boli
-        raw_hits = []
-        for i in range(len(predictions['scores'])):
-            score = predictions['scores'][i].item()
-            if score > threshold: 
-                class_id = int(predictions['labels'][i].item())
+        # 🟢 Pasul 1 & 2: NMS Nativ PyTorch (rezolvă suprapunerile perfect)
+        boxes = predictions['boxes']
+        scores = predictions['scores']
+        labels = predictions['labels']
+        
+        # batched_nms cu iou_threshold=0.4 — elimina suprapunerile clare dar pastreaza detectiile valide adiacente
+        keep_indices = torchvision.ops.batched_nms(boxes, scores, labels, iou_threshold=0.4)
+
+        # DEBUG: afiseaza toate detectiile inainte de filtrare
+        print(f"[DEBUG] Total detectii brute: {len(scores)}")
+        for i in keep_indices[:20]:  # primele 20
+            i = i.item()
+            print(f"  label={labels[i].item()} ({DENTEX_TAGS.get(int(labels[i].item()), '?')}) score={scores[i].item():.4f} box={boxes[i].tolist()}")
+
+        final_hits = []
+        for idx in keep_indices:
+            i = idx.item()
+            score = scores[i].item()
+            if score > threshold:
+                class_id = int(labels[i].item())
                 if class_id in DENTEX_TAGS:
-                    raw_hits.append({
-                        'box': predictions['boxes'][i].tolist(),
+                    final_hits.append({
+                        'box': boxes[i].tolist(),
                         'type': DENTEX_TAGS[class_id],
                         'score': score
                     })
-
-        # 🟢 Pasul 2: Eliminăm suprapunerile (NMS)
-        final_hits = []
-        for hit in sorted(raw_hits, key=lambda x: x['score'], reverse=True):
-            is_dup = False
-            for f in final_hits:
-                ix1, iy1 = max(hit['box'][0], f['box'][0]), max(hit['box'][1], f['box'][1])
-                ix2, iy2 = min(hit['box'][2], f['box'][2]), min(hit['box'][3], f['box'][3])
-                if ix2 > ix1 and iy2 > iy1:
-                    inter = (ix2 - ix1) * (iy2 - iy1)
-                    if inter / ((hit['box'][2]-hit['box'][0])*(hit['box'][3]-hit['box'][1])) > 0.5:
-                        is_dup = True; break
-            if not is_dup: final_hits.append(hit)
 
         # 🟢 Pasul 3: Raportare și Desenare Numerotată
         for idx, hit in enumerate(final_hits, 1):
@@ -134,14 +141,33 @@ def detect_anomalies(image_path: str):
                 "severity": "Critical" if hit['type'] in ["Periapical Lesion", "Impacted Tooth"] else "Moderate"
             })
             
-            x1, y1, x2, y2 = map(int, hit['box'])
-            # Desenăm caseta
-            cv2.rectangle(img_cv2, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            # Setăm culoarea (în format BGR pentru OpenCV)
+            if hit['type'] == "Caries":
+                box_color = (0, 0, 255)      # Roșu
+                text_color = (255, 255, 255) # Alb
+            elif hit['type'] == "Deep Caries":
+                box_color = (0, 165, 255)    # Portocaliu
+                text_color = (255, 255, 255) # Alb
+            elif hit['type'] == "Periapical Lesion":
+                box_color = (0, 255, 255)    # Galben
+                text_color = (0, 0, 0)       # Negru
+            elif hit['type'] == "Impacted Tooth":
+                box_color = (255, 0, 0)      # Albastru
+                text_color = (255, 255, 255) # Alb
+            else:
+                box_color = (0, 255, 0)      # Verde (fallback)
+                text_color = (0, 0, 0)
             
-            # Desenăm un pătrățel alb mic sub număr (ca să fie lizibil)
-            cv2.rectangle(img_cv2, (x1, y1-25), (x1+35, y1), (255, 255, 255), -1)
+            x1, y1, x2, y2 = map(int, hit['box'])
+            
+            # Desenăm caseta
+            cv2.rectangle(img_cv2, (x1, y1), (x2, y2), box_color, 2)
+            
+            # Desenăm fundalul textului cu aceeași culoare ca și cutia
+            cv2.rectangle(img_cv2, (x1, y1-25), (x1+35, y1), box_color, -1)
+            # Scriem numărul
             cv2.putText(img_cv2, f"[{idx}]", (x1+2, y1-5), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
 
         orig_name = Path(image_path).name
         processed_image_path = str(Path(image_path).parent / f"analyzed_{orig_name}")

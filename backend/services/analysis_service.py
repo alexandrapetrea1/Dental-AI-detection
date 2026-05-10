@@ -14,27 +14,22 @@ UPLOAD_DIR = Path("uploads/radiographs")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 def process_and_save_analysis(db: Session, file, filename: str, patient_name: str, patient_age: int):
-    # 1. Salvăm fișierul pe disk
+
     file_location = UPLOAD_DIR / filename
     with open(file_location, "wb+") as file_object:
         shutil.copyfileobj(file.file, file_object)
 
-    # 2. Analizăm cu noul motor Faster R-CNN (care returnează findings și calea pozei)
     findings, processed_path = detect_anomalies(str(file_location))
 
-    # 3. Rezumat sub formă de listă (ex: "1: Caries, 2: Deep Caries")
+  
     if findings:
         summary_text = ", ".join([f["finding_type"].replace("#", "") for f in findings])
     else:
         summary_text = "No anomalies detected"
-        # === GENERATE TREATMENT PLAN USING GEMINI AI ===
     treatment_plan_text = "No conditions requiring immediate treatment were detected at this time."
     
     if findings:
-        # Prepare a summary of the found anomalies
         anomalies_list = "\n".join([f"- {f['finding_type']} with {int(f['confidence']*100)}% confidence" for f in findings])
-        
-        # Build the medical prompt
         prompt = f"""You are an expert dental professional. 
 A patient's dental radiograph has been analyzed by a Computer Vision model, which detected the following anomalies:
 {anomalies_list}
@@ -56,16 +51,15 @@ Use clear headings and bullet points. Do not include any personal identifiable i
             print("Gemini API Error:", e)
             treatment_plan_text = f"The AI treatment planning service is currently unavailable. Error details: {str(e)}"
 
-    # 4. Salvăm în baza de date
     db_report = AnalysisReport(
-    filename=filename,
-    saved_path=str(processed_path) if processed_path else str(file_location),
-    summary=summary_text,
-    findings_json=json.dumps(findings),   
-    patient_name=patient_name,
-    patient_age=patient_age,
-    treatment_plan=treatment_plan_text  
-)
+        filename=filename,
+        saved_path=str(processed_path) if processed_path else str(file_location),
+        summary=summary_text,
+        findings_json=json.dumps(findings),   
+        patient_name=patient_name,
+        patient_age=patient_age,
+        treatment_plan=treatment_plan_text  
+    )
     db.add(db_report)
     db.commit()      
     db.refresh(db_report)
