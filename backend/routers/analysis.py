@@ -1,3 +1,4 @@
+import os
 import time
 from fastapi import APIRouter, Depends, File, UploadFile, Form, HTTPException
 from sqlalchemy.orm import Session
@@ -31,14 +32,39 @@ async def analyze_image(
             "status": "success",
             "findings": model_report.get("findings", []),
             "summary": model_report.get("summary", "Analiza finalizata"),
-            "treatment_plan": db_report.treatment_plan,
-            "disclaimer": "Diagnostic bazat pe modelul Faster R-CNN (DENTEX Edition).",
-            "processed_image_url": f"http://localhost:8000/images/analyzed_{file.filename}?v={int(time.time())}" if file_location and "analyzed_" in file_location else None
+            "img_width": db_report.img_width,
+            "img_height": db_report.img_height,
+            "width": db_report.img_width,
+            "height": db_report.img_height,
+            "processed_image_url": f"http://localhost:8000/images/analyzed_{file.filename}?v={int(time.time())}" if file_location and "analyzed_" in file_location else None,
+            "heatmap_image_url": f"http://localhost:8000/images/heatmap_{file.filename}?v={int(time.time())}" if db_report.heatmap_path else None
         }
     except Exception as e:
         import traceback
-        print(f"❌ EROARE IN ROUTER:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error analyzing image: {str(e)}")
+        error_details = traceback.format_exc()
+        print(f"❌ EROARE CRITICA IN ROUTER:\n{error_details}")
+        raise HTTPException(status_code=500, detail={"message": str(e), "traceback": error_details})
+
+@router.post("/analyze-normalized/{filename}")
+async def analyze_normalized(filename: str, patient_name: str = "Unknown", patient_age: int = 0, db: Session = Depends(get_db)):
+    file_location = f"uploads/radiographs/{filename}"
+    if not os.path.exists(file_location):
+        raise HTTPException(status_code=404, detail="Normalized image not found.")
+    
+    try:
+        db_report, model_report, _ = analysis_service.process_and_save_analysis(
+            db, None, filename, patient_name, patient_age
+        )
+        return {
+            "status": "success",
+            "findings": model_report.get("findings", []),
+            "summary": model_report.get("summary", ""),
+            "img_width": db_report.img_width,
+            "img_height": db_report.img_height,
+            "report_id": db_report.id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/report/{report_id}")
 def get_report(report_id: int, db: Session = Depends(get_db)):
@@ -57,12 +83,15 @@ def get_report(report_id: int, db: Session = Depends(get_db)):
         "filename": report.filename,
         "patient_name": report.patient_name,
         "patient_age": report.patient_age,
+        "img_width": report.img_width,
+        "img_height": report.img_height,
         "summary": report.summary,
         "treatment_plan": report.treatment_plan,
         "status": "success",
         "processed_image_url": processed_url,
+        "heatmap_image_url": f"http://localhost:8000/images/heatmap_{report.filename}" if report.heatmap_path else None,
         "disclaimer": "Diagnostic bazat pe modelul Faster R-CNN (DENTEX Edition).",
-        "findings": findings   # ← acum sunt cele reale!
+        "findings": findings
     }
 
 

@@ -8,6 +8,8 @@ import os
 import cv2
 import ssl
 import traceback
+import numpy as np
+from torch.nn import functional as F_nn
 
 # 🛡️ 1. SETUP MOTOR ȘI SECURITATE
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -86,16 +88,74 @@ try:
 except Exception as e:
     print(f"❌ Crash fatal la pornire: {e}")
 
-# 🔬 2. FUNCȚIA DE ANALIZĂ PROFESIONALĂ
+# 🔬 2. EXPLAINABLE AI (EIGEN-CAM) LOGIC
+class EigenCAM:
+    def __init__(self, model, target_layer):
+        self.model = model
+        self.target_layer = target_layer
+        self.activations = None
+        self.hook_layers()
+
+    def hook_layers(self):
+        def save_activations(module, input, output):
+            self.activations = output
+        self.target_layer.register_forward_hook(save_activations)
+
+    def generate_heatmap(self, img_tensor):
+        self.model.eval()
+        with torch.no_grad():
+            _ = self.model([img_tensor])
+        
+        # Luam activarile [1, Channels, H, W]
+        A = self.activations.cpu()
+        
+        # Max-Activation Projection: Luam cea mai puternica trasatura din fiecare pixel
+        # Aceasta metoda "aprinde" tot ce a considerat modelul ca fiind important
+        heatmap, _ = torch.max(A, dim=1)
+        heatmap = heatmap.squeeze()
+        
+        # Aplicam un prag pentru a curata fundalul (accentuam zonele tari)
+        heatmap = torch.relu(heatmap - (torch.mean(heatmap) * 0.5))
+        
+        # Eliminam artefactele de pe margini (padding noise)
+        h, w = heatmap.shape
+        margin_h, margin_w = int(h * 0.05), int(w * 0.05)
+        heatmap[0:margin_h, :] = 0
+        heatmap[h-margin_h:h, :] = 0
+        heatmap[:, 0:margin_w] = 0
+        heatmap[:, w-margin_w:w] = 0
+
+        # Normalizare finala
+        hi = torch.max(heatmap)
+        lo = torch.min(heatmap)
+        if hi > lo:
+            heatmap = (heatmap - lo) / (hi - lo)
+        
+        return heatmap.numpy()
+
+def apply_heatmap(orig_img, heatmap):
+    heatmap_resized = cv2.resize(heatmap, (orig_img.shape[1], orig_img.shape[0]))
+    heatmap_resized = np.uint8(255 * heatmap_resized)
+    heatmap_colored = cv2.applyColorMap(heatmap_resized, cv2.COLORMAP_JET)
+    
+    superimposed_img = cv2.addWeighted(orig_img, 0.6, heatmap_colored, 0.4, 0)
+    return superimposed_img
+
+# 🔬 3. FUNCȚIA DE ANALIZĂ PROFESIONALĂ
 def detect_anomalies(image_path: str):
     findings = []
     processed_image_path = None
-    if model is None: return findings, None
+    heatmap_path = None
+    h, w = 0, 0
+    if model is None: 
+        return {"findings": findings, "processed_image_url": None, "heatmap_image_url": None, "img_width": 0, "img_height": 0}
 
     try:
         img_cv2 = cv2.imread(image_path)
-        if img_cv2 is None: return findings, None
+        if img_cv2 is None: 
+            return {"findings": findings, "processed_image_url": None, "heatmap_image_url": None, "img_width": 0, "img_height": 0}
         
+        h, w = img_cv2.shape[:2]
         img_rgb = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2RGB)
         img_tensor = F.to_tensor(img_rgb).to(device)
         
@@ -132,12 +192,15 @@ def detect_anomalies(image_path: str):
                     })
 
         # 🟢 Pasul 3: Raportare și Desenare Numerotată
+        # 🟢 Pasul 3: Raportare și Desenare Numerotată
         for idx, hit in enumerate(final_hits, 1):
             finding_text = f"#{idx}: {hit['type']}"
             findings.append({
+                "id": int(idx),
                 "finding_type": finding_text,
                 "confidence": hit['score'],
                 "location": "Marked on Image",
+                "box": hit['box'],
                 "severity": "Critical" if hit['type'] in ["Periapical Lesion", "Impacted Tooth"] else "Moderate"
             })
             
@@ -162,18 +225,46 @@ def detect_anomalies(image_path: str):
             
             # Desenăm caseta
             cv2.rectangle(img_cv2, (x1, y1), (x2, y2), box_color, 2)
-            
-            # Desenăm fundalul textului cu aceeași culoare ca și cutia
-            cv2.rectangle(img_cv2, (x1, y1-25), (x1+35, y1), box_color, -1)
-            # Scriem numărul
-            cv2.putText(img_cv2, f"[{idx}]", (x1+2, y1-5), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
 
+        # After the loop finishes processing all hits
+        summary = ", ".join([f"{f['finding_type']}" for f in findings]) if findings else "No anomalies detected"
+
+        # 🟢 Pasul 3: Salvare Imagine cu Detecții (Boxes)
         orig_name = Path(image_path).name
         processed_image_path = str(Path(image_path).parent / f"analyzed_{orig_name}")
         cv2.imwrite(processed_image_path, img_cv2)
+        print(f"🖼️ Imagine analizată salvată: {processed_image_path}")
+
+        # 🟢 Pasul 4: Generare Grad-CAM (XAI)
+        # Dacă avem detecții, generăm heatmap pentru prima (cea mai sigură)
+        if final_hits:
+            try:
+                # Targetăm stratul 4 din backbone-ul ResNet (înainte de FPN)
+                target_layer = model.backbone.body.layer4
+                cam = EigenCAM(model, target_layer)
+                
+                # Facem heatmap (Eigen-CAM)
+                img_orig_for_heatmap = cv2.imread(image_path)
+                raw_heatmap = cam.generate_heatmap(img_tensor)
+                heatmap_img = apply_heatmap(img_orig_for_heatmap, raw_heatmap)
+                
+                heatmap_path = str(Path(image_path).parent / f"heatmap_{orig_name}")
+                cv2.imwrite(heatmap_path, heatmap_img)
+                print(f"✨ Heatmap generat cu succes: {heatmap_path}")
+                # Resetăm modelul la eval
+                model.eval()
+            except Exception as cam_e:
+                print(f"⚠️ Nu am putut genera heatmap: {cam_e}")
+                model.eval()
 
     except Exception as e:
         print(f"❌ Eroare la analiza: {traceback.format_exc()}")
         
-    return findings, processed_image_path
+    return {
+        "findings": findings,
+        "summary": summary,
+        "processed_image_url": processed_image_path,
+        "heatmap_image_url": heatmap_path,
+        "img_width": w,
+        "img_height": h
+    }

@@ -8,18 +8,52 @@ import os
 from dotenv import load_dotenv
 import google.generativeai as genai
 load_dotenv()
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+try:
+    if "GEMINI_API_KEY" in os.environ:
+        genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+    else:
+        print("⚠️ GEMINI_API_KEY missing in .env file. Treatment planning will be disabled.")
+except Exception as e:
+    print(f"⚠️ Error configuring Gemini: {e}")
 
 UPLOAD_DIR = Path("uploads/radiographs")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 def process_and_save_analysis(db: Session, file, filename: str, patient_name: str, patient_age: int):
-
     file_location = UPLOAD_DIR / filename
-    with open(file_location, "wb+") as file_object:
-        shutil.copyfileobj(file.file, file_object)
+    
+    # Only save/copy if a new file object is provided
+    if file is not None:
+        with open(file_location, "wb+") as file_object:
+            shutil.copyfileobj(file.file, file_object)
+    
+    print(f"🔬 Running AI detection on: {file_location}")
 
-    findings, processed_path = detect_anomalies(str(file_location))
+    result = detect_anomalies(str(file_location))
+    findings = result["findings"]
+    processed_path = result["processed_image_url"]
+    heatmap_path = result["heatmap_image_url"]
+    img_width = result["img_width"]
+    img_height = result["img_height"]
+
+    # Adăugăm recomandări clinice automate pentru fiecare detecție
+    for f in findings:
+        t = f['finding_type'].lower()
+        if 'periapical' in t:
+            f['recommendation'] = "Endodontic evaluation required. Possible root canal treatment."
+            f['priority'] = "High"
+        elif 'deep caries' in t:
+            f['recommendation'] = "Urgent restoration. Risk of pulp exposure."
+            f['priority'] = "High"
+        elif 'caries' in t:
+            f['recommendation'] = "Restorative filling recommended."
+            f['priority'] = "Moderate"
+        elif 'impacted' in t:
+            f['recommendation'] = "Orthodontic or surgical consultation for extraction."
+            f['priority'] = "Moderate"
+        else:
+            f['recommendation'] = "General clinical monitoring."
+            f['priority'] = "Low"
 
   
     if findings:
@@ -44,7 +78,7 @@ Use clear headings and bullet points. Do not include any personal identifiable i
 """
         try:
             import os
-            model = genai.GenerativeModel('gemini-2.5-flash')
+            model = genai.GenerativeModel('gemini-pro')
             response = model.generate_content(prompt)
             treatment_plan_text = response.text
         except Exception as e:
@@ -54,11 +88,14 @@ Use clear headings and bullet points. Do not include any personal identifiable i
     db_report = AnalysisReport(
         filename=filename,
         saved_path=str(processed_path) if processed_path else str(file_location),
+        heatmap_path=str(heatmap_path) if heatmap_path else None,
         summary=summary_text,
         findings_json=json.dumps(findings),   
         patient_name=patient_name,
         patient_age=patient_age,
-        treatment_plan=treatment_plan_text  
+        treatment_plan=treatment_plan_text,
+        img_width=img_width,
+        img_height=img_height
     )
     db.add(db_report)
     db.commit()      

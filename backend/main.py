@@ -6,7 +6,7 @@ from database import engine, Base
 import models.user
 import models.analysis_report
 
-from routers import auth_router, analysis_router
+from routers import auth_router, analysis_router, dicom_router
 
 Base.metadata.create_all(bind=engine)
 
@@ -24,6 +24,7 @@ app.mount("/images", StaticFiles(directory="uploads/radiographs"), name="images"
 
 app.include_router(auth_router)
 app.include_router(analysis_router)
+app.include_router(dicom_router)
 
 @app.get("/")
 def read_root():
